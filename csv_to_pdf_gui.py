@@ -38,11 +38,13 @@ def load_rows(csv_path):
 
 
 def parse_dispatch_fields(row):
-    lo, hi = 15, 37
+    """Best-effort extraction of Action / Operator-name / Measure / Detail / Remarks
+    from the unlabeled dispatch columns. Command comes directly from column T (index 19)
+    and Recover directly from column P (index 15) — handled separately in build_records."""
+    lo, hi = 16, 37
     segment = row[lo:hi] if len(row) >= hi else row[lo:]
     dates = [v.strip() for v in segment if DATE_RE.match(v.strip())]
     texts = [v.strip() for v in segment if v.strip() and re.search(r'[A-Za-z]', v)]
-    command = dates[0] if dates else ''
     measure = dates[-1] if dates else ''
     action, operator_name, detail = '', '', ''
     if texts:
@@ -54,7 +56,7 @@ def parse_dispatch_fields(row):
             else:
                 action = first
     remarks = row[37].strip() if len(row) > 37 else ''
-    return command, action, operator_name, measure, detail, remarks
+    return action, operator_name, measure, detail, remarks
 
 
 def build_records(rows, log=None):
@@ -72,19 +74,21 @@ def build_records(rows, log=None):
         receive_date, area = row[0].strip(), row[2].strip()
         cust_id, cust_name = row[3].strip(), row[4].strip()
         signal_code, signal_name = row[8].strip(), row[9].strip()
+        recover = 'Ok' if row[15].strip() else ''   # column P
+        command = row[19].strip()                    # column T
         key = (cust_id, area)
         if signal_name in ('Arm', 'Disarm'):
             status = signal_name
             state[key] = signal_name
             operator = row[12].strip()
-            command = action = measure = detail = remarks = ''
+            action = measure = detail = remarks = ''
         else:
             status = state.get(key, '')
-            command, action, operator, measure, detail, remarks = parse_dispatch_fields(row)
+            action, operator, measure, detail, remarks = parse_dispatch_fields(row)
         records.append({
             'receive_date': receive_date, 'area': area, 'cust_id': cust_id,
             'cust_name': cust_name, 'signal_code': signal_code, 'signal_name': signal_name,
-            'status': status, 'operator': operator, 'command': command,
+            'recover': recover, 'status': status, 'operator': operator, 'command': command,
             'action': action, 'measure': measure, 'detail': detail, 'remarks': remarks,
         })
     return records
@@ -93,10 +97,11 @@ def build_records(rows, log=None):
 COLUMNS = [
     ('receive_date', 'Receive date', 0.72 * inch), ('area', 'Area', 0.42 * inch),
     ('cust_id', 'CustomerID', 0.95 * inch), ('cust_name', 'Customer name', 1.35 * inch),
-    ('signal_code', 'Signal code', 0.72 * inch), ('signal_name', 'Signal name', 1.05 * inch),
-    ('status', 'Status', 0.55 * inch), ('operator', 'Operator', 0.85 * inch),
-    ('command', 'Command', 0.72 * inch), ('action', 'Action', 0.95 * inch),
-    ('measure', 'Measure', 0.72 * inch), ('detail', 'Detail', 0.95 * inch),
+    ('signal_code', 'Signal code', 0.72 * inch), ('signal_name', 'Signal name', 1.0 * inch),
+    ('recover', 'Recover', 0.5 * inch), ('status', 'Status', 0.55 * inch),
+    ('operator', 'Operator', 0.8 * inch),
+    ('command', 'Command', 0.72 * inch), ('action', 'Action', 0.9 * inch),
+    ('measure', 'Measure', 0.72 * inch), ('detail', 'Detail', 0.9 * inch),
 ]
 
 
@@ -110,6 +115,12 @@ def extract_id_number(cust_id):
     return digits or 'na'
 
 
+def extract_clean_id(cust_id):
+    """'01-001365-____' -> '01-001365' (drop the trailing placeholder segment)."""
+    parts = [p for p in cust_id.split('-') if p.strip('_') != '']
+    return '-'.join(parts) if parts else cust_id
+
+
 def sanitize_filename(name):
     name = re.sub(r'[\\/:*?"<>|]', '_', name)
     return name.strip()[:150] or 'unnamed'
@@ -120,23 +131,19 @@ def make_pdf(records, out_path, group_label):
     cell_style = ParagraphStyle('cell', parent=styles['Normal'], fontSize=6.5, leading=8)
     header_style = ParagraphStyle('hdr', parent=styles['Normal'], fontSize=7, leading=8,
                                    textColor=colors.white, fontName='Helvetica-Bold')
-    title_style = ParagraphStyle('title', parent=styles['Normal'], fontSize=9, leading=12)
+
+    page_width, page_height = landscape(letter)
 
     doc = SimpleDocTemplate(out_path, pagesize=landscape(letter),
                              leftMargin=0.35 * inch, rightMargin=0.35 * inch,
-                             topMargin=0.4 * inch, bottomMargin=0.4 * inch)
+                             topMargin=0.65 * inch, bottomMargin=0.4 * inch)
 
     dates = [r['receive_date'] for r in records if r['receive_date']]
     period_start = min(dates) if dates else ''
     period_end = max(dates) if dates else ''
     generated = datetime.now().strftime('%y/%m/%d %H:%M')
 
-    story = [
-        Paragraph(f"Period: {period_start} ~ {period_end}&nbsp;&nbsp;&nbsp; "
-                  f"List by time&nbsp;&nbsp;&nbsp; Generated {generated}", title_style),
-        Paragraph(f"<b>{group_label}</b>", title_style),
-        Spacer(1, 6),
-    ]
+    story = []
 
     header_row = [Paragraph(h, header_style) for _, h, _ in COLUMNS]
     table_data = [header_row]
@@ -154,13 +161,18 @@ def make_pdf(records, out_path, group_label):
     ]))
     story.append(table)
 
-    def add_page_number(canvas, doc_):
+    def draw_header(canvas, doc_):
         canvas.saveState()
-        canvas.setFont('Helvetica', 7)
-        canvas.drawRightString(landscape(letter)[0] - 0.35 * inch, 0.25 * inch, f"Page {doc_.page}")
+        top_y = page_height - 0.4 * inch
+        canvas.setFont('Helvetica', 8)
+        canvas.drawString(0.35 * inch, top_y, f"Period : {period_start} ~ {period_end}")
+        canvas.setFont('Helvetica-Bold', 18)
+        canvas.drawCentredString(page_width / 2, top_y - 3, "List by time")
+        canvas.setFont('Helvetica', 8)
+        canvas.drawRightString(page_width - 0.35 * inch, top_y, f"{generated}   Page {doc_.page}")
         canvas.restoreState()
 
-    doc.build(story, onFirstPage=add_page_number, onLaterPages=add_page_number)
+    doc.build(story, onFirstPage=draw_header, onLaterPages=draw_header)
 
 
 FIELD_MAP = {'Customer Name': 'cust_name', 'Customer ID': 'cust_id', 'Area': 'area'}
@@ -262,7 +274,9 @@ class App(tk.Tk):
 
             targets = list(groups.keys())
             if value:
-                targets = [g for g in targets if value.lower() in g.lower()]
+                # Support comma-separated multi-value input, e.g. "1328,1355,1555,1999"
+                wanted = [v.strip().lower() for v in value.split(',') if v.strip()]
+                targets = [g for g in targets if any(w in g.lower() for w in wanted)]
                 if not targets:
                     self.log("No matching records for that filter value.")
                     self.finish()
@@ -273,8 +287,9 @@ class App(tk.Tk):
             for key in sorted(targets):
                 group_records = groups[key]
                 cust_id = group_records[0]['cust_id']
-                id_prefix = extract_id_number(cust_id)
-                fname = f"{id_prefix} - {sanitize_filename(key)}.pdf"
+                cust_name = group_records[0]['cust_name']
+                clean_id = extract_clean_id(cust_id)
+                fname = f"{clean_id}-{sanitize_filename(cust_name)}.pdf"
                 out_path = os.path.join(out_dir, fname)
                 make_pdf(group_records, out_path, key)
                 written += 1
