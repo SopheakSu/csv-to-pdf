@@ -38,25 +38,22 @@ def load_rows(csv_path):
 
 
 def parse_dispatch_fields(row):
-    """Best-effort extraction of Action / Operator-name / Measure / Detail / Remarks
-    from the unlabeled dispatch columns. Command comes directly from column T (index 19)
-    and Recover directly from column P (index 15) — handled separately in build_records."""
+    """Best-effort extraction of Action / Measure / Detail / Remarks from the
+    unlabeled dispatch columns. Command comes directly from column T (index 19),
+    Recover from column P (index 15), and Operator from column M (index 12) —
+    all handled directly in build_records, never guessed from here."""
     lo, hi = 16, 37
     segment = row[lo:hi] if len(row) >= hi else row[lo:]
     dates = [v.strip() for v in segment if DATE_RE.match(v.strip())]
     texts = [v.strip() for v in segment if v.strip() and re.search(r'[A-Za-z]', v)]
     measure = dates[-1] if dates else ''
-    action, operator_name, detail = '', '', ''
+    action, detail = '', ''
     if texts:
         detail = texts[-1]
-        if len(texts) >= 2:
-            first = texts[0]
-            if ',' in first or not re.search(r'\b(Team|Respond|Center|ESS)\b', first, re.I):
-                operator_name = first
-            else:
-                action = first
+        if len(texts) >= 2 and re.search(r'\b(Team|Respond|Center|ESS)\b', texts[0], re.I):
+            action = texts[0]
     remarks = row[37].strip() if len(row) > 37 else ''
-    return action, operator_name, measure, detail, remarks
+    return action, measure, detail, remarks
 
 
 def build_records(rows, log=None):
@@ -76,15 +73,15 @@ def build_records(rows, log=None):
         signal_code, signal_name = row[8].strip(), row[9].strip()
         recover = 'Ok' if row[15].strip() else ''   # column P
         command = row[19].strip()                    # column T
+        operator = row[12].strip()                    # column M — always, no fallback
         key = (cust_id, area)
         if signal_name in ('Arm', 'Disarm'):
             status = signal_name
             state[key] = signal_name
-            operator = row[12].strip()
             action = measure = detail = remarks = ''
         else:
             status = state.get(key, '')
-            action, operator, measure, detail, remarks = parse_dispatch_fields(row)
+            action, measure, detail, remarks = parse_dispatch_fields(row)
         records.append({
             'receive_date': receive_date, 'area': area, 'cust_id': cust_id,
             'cust_name': cust_name, 'signal_code': signal_code, 'signal_name': signal_name,
